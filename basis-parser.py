@@ -129,7 +129,6 @@ def parse(url:str) -> pd.DataFrame:
     return df_11, df_time_1n
 
 
-
 if __name__ == '__main__':
 
     URL = "https://basis.uni-bonn.de/qisserver/rds?state=wtree&search=1&trex=step&root120212=235519%7C241835%7C241834%7C241849&P.vx=lang"
