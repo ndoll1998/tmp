@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import datetime
 
 
+# mapping for str to int
 repeat_mapping = {
     "einzel": 0,
     "wöch": 1,
