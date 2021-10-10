@@ -1,11 +1,11 @@
+import os
 import re
 import requests
 import pandas as pd
+from hashlib import md5
 from bs4 import BeautifulSoup
-import datetime
+from datetime import datetime, timedelta
 
-
-# mapping for str to int
 repeat_mapping = {
     "einzel": 0,
     "wöch": 1,
@@ -13,130 +13,144 @@ repeat_mapping = {
 }
 
 weekday_mapping = {
-    "Mo": 0,
-    "Di": 1,
-    "Mi": 2,
-    "Do": 3,
-    "Fr": 4,
-    "Sa": 5,
-    "So": 6,
+    "mo": 0,
+    "di": 1,
+    "mi": 2,
+    "do": 3,
+    "fr": 4,
+    "sa": 5,
+    "so": 6,
 }
-
 
 def clean_text(text:str) -> str:
     text = ''.join((c if c.isprintable() else " " for c in text))
     text = re.sub(" +", " ", text.strip())
     return text
 
+def parse(url:str) -> None:
 
-def parse(url:str) -> pd.DataFrame:
+    # create dataframes to hold gathered data
+    df_info = pd.DataFrame(columns=["EventID", "Name", "Type", "Workload", "Lecturers"])
+    df_time = pd.DataFrame(columns=["EventID", "From", "To", "Weekday", "Start_Date", "End_Date", "Repeat"])
 
     # get html
     resp = requests.get(url)
     if resp.status_code != 200:
         raise RuntimeError("Invalid response! (%s)" % resp.status_code)
 
-    # parse html 
+    # cleanup and parse response
     soup = BeautifulSoup(resp.content, 'lxml')
-
-    selector = "#wrapper > div.divcontent > div.content_max_portal_qis > table > tr > td > table"
-
-    df_11 = pd.DataFrame(columns=["ID", "Name", "Type", "Workload", "Lecturers"])
-    df_time_1n = pd.DataFrame(columns=["ID", "From", "To", "Weekday", "Start_Date", "End_Date", "Repeat"])
-
-    next_is_time_table = False
-    for item in soup.select(selector):
     
-        item_info = item.select_one("tr > td")
-        # check if item is valid
-        if item_info is None:
+    # find all tables holding information about an event
+    tables = soup.select("#wrapper > div.divcontent > div.content_max_portal_qis > table > tr > td > table")
+
+    k = 0
+    tables_iter = iter(tables)
+    while True:
+
+        # get next table
+        try:                    event = next(tables_iter)
+        except StopIteration:   break
+
+        event_info = event.select_one("tr > td > div.klein")
+        # check if item defines a new module
+        if event_info is None:
             continue
 
-        # check if item is a module, toturial, etc. or none
-        item_type = item_info.select_one("div.klein > strong[style*='color: green']")
-        # item does not initialize a new module
-        if item_type is None:
-            # but it could be a time table for the previous module
-            if next_is_time_table:
-                next_is_time_table = False
-                # parse table
-                table = [row.find_all("td") for row in item.find_all("tr")]
-                table = [
-                    [clean_text(el.get_text(separator=" ")) for el in row]
-                    for row in table if len(row) == 7
-                ]
-                
-                for row in table:
-                    time_item = {}
-                    time_item["ID"] = item_id
-                    time_item["Weekday"] = weekday_mapping[row[1]] if len(row[1]) > 1 else None
-                    # check if from - to - repeat string is valid
-                    if " - " in row[2]:
-                        from_st_ct, to_repeat = row[2].split(" - ")
-                        from_time, st_ct = from_st_ct.split(" ") if " " in from_st_ct else (from_st_ct, "(c.t.)")
-                        to_time, repeat = to_repeat.split(" ") if " " in to_repeat else (to_repeat, None)
-                        # convert to datetime.time
-                        from_time = datetime.datetime.strptime(from_time, "%H:%M" if ":" in from_time else "%H")
-                        to_time = datetime.datetime.strptime(to_time, "%H:%M" if ":" in to_time else "%H")
-                        # adjust timing by st_ct
-                        from_time += datetime.timedelta(minutes=0 if st_ct == "(s.t.)" else 15)
-                        to_time -= datetime.timedelta(minutes=30 if st_ct == "(s.t.)" else 15)
-                        # convert repeat to integer codes
-                        repeat = repeat_mapping[repeat.lower()]
-                        # add time data item
-                        time_item.update({
-                            "From": from_time.strftime("%H:%M"),
-                            "To": to_time.strftime("%H:%M"),
-                            "Repeat": repeat,
-                        })
-                    if " bis " in row[-1]:
-                        time_item["Start_Date"], time_item["End_Date"] = row[-1].split(" bis ")
-                    df_time_1n = df_time_1n.append(time_item, ignore_index=True)
+        # get event name
+        event_name = event.select_one("tr > td > h2 > a.regular")
+        event_name = clean_text(event_name.text)
 
-            continue
-    
-        assert not next_is_time_table
+        info, lecs = re.split(r"\s*:\s*", event_info.text.strip())
+        #  gather some general information about the event
+        info = re.split(r"[\t\r\n\xa0]+", info.strip())
+        info = [txt for txt in map(clean_text, info) if len(txt) > 0]
+        semester, event_id, event_type = info[:3]
+        # make sure the event id is valid
+        if not re.match(r"[0-9]+", event_id):
+            # in case this is a tutorial just take the event id
+            # of the corresponding module (should be right before this one)
+            if event_type in ["Übung", "Tutorial"]:
+                event_id = df_info.iloc[-1]["EventID"]
+            else:
+                # create new id by hashing name (hopefully unique)
+                event_id = md5(event_name.encode('utf-8')).hexdigest()[:9]
+                event_id = str(int(event_id, 16))[:9] # convert to decimal
+        # workload
+        workload = None
+        if len(info) > 3:
+            match = re.search("\d.\d(?=\s*SWS)", info[3])
+            if match is not None:
+                workload = match.group().strip()
+        # parse lecturers
+        lecs = re.split(r"\s*;\s*", clean_text(lecs))
+        lecs = lecs[:-1] if len(lecs[-1]) == 0 else lecs
+        lecs = [re.sub(r"\(.*\)", "", l) for l in lecs] # remove all parentheses, may not wanted
 
-        # find some more information
-        item_type = item_type.text.strip()
-        item_name = item_info.select_one("h2 > a.regular").text.strip()
-       
-        item_id, item_name = item_name.split(" - ", maxsplit=1) 
-
-        infos = item_info.select_one("div.klein").text.strip()
-        infos = clean_text(infos)
-
-        general, lecturers = re.split(r"[Dozent|Dozenten]\s*:", infos)
-        item_workload = re.search(r"\b[0-9]+\.[0-9]\s*SWS\b", general)
-        item_workload = item_workload.group()[:-3]
-        # clean up lecturers
-        lecturers = [lec.strip() for lec in lecturers.split(';')]
-        lecturers = [lec for lec in lecturers if len(lec) > 0]
-
-        df_11 = df_11.append({
-            "ID": item_id,
-            "Name": item_name,
-            "Type": item_type,
-            "Workload": float(item_workload),
-            "Lecturers": "; ".join(lecturers),
+        # add row to dataframe
+        df_info = df_info.append({
+            "EventID": event_id,
+            "Name": event_name,
+            "Type": event_type,
+            "Workload": workload,
+            "Lecturers": ";".join(lecs)
         }, ignore_index=True)
 
-        # next table will be a time table
-        next_is_time_table = True
+        # the next table should be the time table
+        # corresponding to the current event 
+        table = next(tables_iter)
+        # so lets parse it
+        table = [row.find_all("td") for row in table.find_all("tr")]
+        table = [
+            [clean_text(el.get_text(separator=" ")) for el in row]
+            for row in table if len(row) == 7
+        ]
+        
+        for (_, weekday, time, _, _, _, period) in table:
+            row = {"EventID": event_id}
+            if len(weekday) > 1:
+                row["Weekday"] = weekday_mapping[weekday.lower()]
+            # parse period dates
+            begin_end = re.findall(r"\d+\s*[.-/]\s*\d+\s*[.-/]\s*\d\d\d\d", period)
+            if len(begin_end) >= 1:
+                row["Start_Date"] = begin_end[0]
+            if len(begin_end) == 2:
+                row["End_Date"] = begin_end[1]
 
-    # print(soup.select("#wrapper > div.divcontent > div.content_max_portal_qis")[0].prettify())
-    df_11.set_index("ID", inplace=True)
+            # parse time and repeat
+            time = time.lower()
+            is_ct = ("s.t." not in time)    # by default assumes c.t.
+            repeat = [v for k, v in repeat_mapping.items() if k in time]
+            repeat = repeat[0] if len(repeat) > 0 else 1
+            # find start and end time
+            from_to = re.findall(r"\d{1,2}(?::\d\d)?", time)
+            if len(from_to) >= 2:
+                from_time, to_time = from_to[:2]
+                # convert to time objects
+                from_time = datetime.strptime(from_time, "%H:%M" if ":" in from_time else "%H")
+                to_time = datetime.strptime(to_time, "%H:%M" if ":" in to_time else "%H")
+                # adjust timing by st/ct
+                from_time += timedelta(minutes=15 if is_ct else 0)
+                to_time -= timedelta(minutes=15 if is_ct else 30)
+                # write to row
+                row.update({
+                    "From":   from_time.strftime("%H:%M"),
+                    "To":     to_time.strftime("%H:%M"),
+                    "Repeat": repeat
+                })
+            # add row to dataframe
+            if len(row) > 1:
+                df_time = df_time.append(row, ignore_index=True)
 
-    return df_11, df_time_1n
+    return df_info, df_time
 
 
 if __name__ == '__main__':
 
     URL = "https://basis.uni-bonn.de/qisserver/rds?state=wtree&search=1&trex=step&root120212=235519%7C241835%7C241834%7C241849&P.vx=lang"
-    df_11, df_time_1n = parse(URL)
+    df_info, df_time = parse(URL)
 
-    print(df_11.head())
-    print(df_time_1n.head())
-
-    df_11.to_csv("df_11.csv")
-    df_time_1n.to_csv("df_time_1n.csv")
+    print("General Information:")
+    print(df_info)
+    print("\nTimes:")
+    print(df_time)
