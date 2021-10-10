@@ -8,7 +8,7 @@ import datetime
 repeat_mapping = {
     "einzel": 0,
     "wöch": 1,
-    "14-täglich": 2
+    "14-täglich": 2,
 }
 
 weekday_mapping = {
