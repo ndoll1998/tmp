@@ -22,6 +22,11 @@ weekday_mapping = {
     "so": 6,
 }
 
+role_mapping = {
+    "verantwortlich": 0,
+    "durchführend": 1
+}
+
 def clean_text(text:str) -> str:
     text = ''.join((c if c.isprintable() else " " for c in text))
     text = re.sub(" +", " ", text.strip())
@@ -30,8 +35,9 @@ def clean_text(text:str) -> str:
 def parse(url:str) -> None:
 
     # create dataframes to hold gathered data
-    df_info = pd.DataFrame(columns=["EventID", "Name", "Type", "Workload", "Lecturers"])
+    df_info = pd.DataFrame(columns=["EventID", "Name", "Type", "Workload"])
     df_time = pd.DataFrame(columns=["EventID", "From", "To", "Weekday", "Start_Date", "End_Date", "Repeat"])
+    df_lecs = pd.DataFrame(columns=["EventID", "Lecturer", "Role"])
 
     # get html
     resp = requests.get(url)
@@ -82,20 +88,32 @@ def parse(url:str) -> None:
             match = re.search("\d.\d(?=\s*SWS)", info[3])
             if match is not None:
                 workload = match.group().strip()
-        # parse lecturers
-        lecs = re.split(r"\s*;\s*", clean_text(lecs))
-        lecs = lecs[:-1] if len(lecs[-1]) == 0 else lecs
-        lecs = [re.sub(r"\(.*\)", "", l) for l in lecs] # remove all parentheses, may not wanted
 
         # add row to dataframe
         df_info = df_info.append({
             "EventID": event_id,
             "Name": event_name,
             "Type": event_type,
-            "Workload": workload,
-            "Lecturers": ";".join(lecs)
+            "Workload": workload
         }, ignore_index=True)
 
+        # parse lecturers
+        lecs = re.split(r"\s*;\s*", clean_text(lecs))
+        lecs = lecs[:-1] if len(lecs[-1]) == 0 else lecs
+        # get role of each lecturer
+        roles = [re.search(r"\(.*\)", l) for l in lecs]
+        roles = [None if m is None else m.group()[1:-1].strip() for m in roles]
+        roles = [None if r is None else role_mapping[r.lower()] for r in roles]
+        # clean-up lecturers
+        lecs = [re.sub(r"\(.*\)", "", l) for l in lecs]
+        # add all to lecturers dataframe
+        for lec, role in zip(lecs, roles):
+            df_lecs = df_lecs.append({
+                "EventID": event_id, 
+                "Lecturer": lec, 
+                "Role": role
+            }, ignore_index=True)
+        
         # the next table should be the time table
         # corresponding to the current event 
         table = next(tables_iter)
@@ -142,15 +160,17 @@ def parse(url:str) -> None:
             if len(row) > 1:
                 df_time = df_time.append(row, ignore_index=True)
 
-    return df_info, df_time
+    return df_info, df_time, df_lecs
 
 
 if __name__ == '__main__':
 
     URL = "https://basis.uni-bonn.de/qisserver/rds?state=wtree&search=1&trex=step&root120212=235519%7C241835%7C241834%7C241849&P.vx=lang"
-    df_info, df_time = parse(URL)
+    df_info, df_time, df_lecs = parse(URL)
 
     print("General Information:")
     print(df_info)
     print("\nTimes:")
     print(df_time)
+    print("\nLecturers:")
+    print(df_lecs)
