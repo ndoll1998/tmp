@@ -22,6 +22,7 @@ weekday_mapping = {
     "so": 6,
 }
 
+
 role_mapping = {
     "verantwortlich": 0,
     "durchführend": 1
